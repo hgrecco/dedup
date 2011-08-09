@@ -1,0 +1,874 @@
+#! /usr/bin/env python
+"""
+===========================
+dedup: a deduplication tool
+===========================
+
+Find and delete duplicated files.
+
+Use cases
+---------
+
+Find duplicates in a specific folder and create a script to delete them:
+
+    dedup find -o byedups.sh /your/folder
+
+Find duplicated mp3 in a folder (and subfolders) and create a script to delete them:
+
+    dedup find --include *.mp3 -r -o byedups.sh /your/folder
+
+Find duplicates except jpg in two folders and create a script to delete them:
+
+    dedup find --exclude *.jpg -o byedups.sh /your/folder /your/other/folder
+
+
+How does it work?
+-----------------
+
+Finding duplicates is a two steps process:
+
+    1. Indexing: The full path of each file is stored in a database together
+       with a hash of the file. Currently the following hashes are implemented:
+        a. size: size of the file in bytes.
+        b. md5partial: md5 hex digest of the first 8Kb of the file.
+        c. md5: md5 hex diggest of the file.
+ 
+       Hashing allows narrowing down the list of potetial duplicates. 
+       While is very likely that two different files have the same size, it is 
+       unlikely that they have the same hash (`birthday problem`_). 
+
+       .. birthday problem : http://en.wikipedia.org/wiki/Birthday_problem
+
+    2. Comparing: the potential duplicates (i.e. files with the same hash) are 
+       compared to detect true duplicates.
+
+Which is the right hash method depends on the number of files to check, their 
+size and the expected number of duplicates. Remember that is necessary to read
+the complete file to generate a full hash and therefore it is time consuming to 
+do it for files in which the first 8k are already different.
+
+The default choice is md5partial which provides a good tradeoff between speed 
+and reliability.
+
+
+Why do you generate a script instead of directly deleting the files?
+--------------------------------------------------------------------
+
+Is good to have a way to check (and double-check) before deleting lots of files,
+and being dedup a command line tool generating a script which you can open, edit
+and check was the simplest and yet most powerful.
+
+In addition this tools was concieved to delete duplicates across computers. 
+Generating scripts allows you to do this easily.
+
+
+Deduplicating in different computers
+------------------------------------
+
+First create an index for each computer that you want to deduplicate::
+
+    # In computer 1
+    dedup index -o c1.sqlite -r /your/folder
+
+    # In computer 2
+    dedup index -o c2.sqlite -r /your/other/folder
+
+Then transfer the two databases (c1.sqlite and c2.sqlite) to a single computer
+and generate the script::
+
+    dedup script --pot c1.sqlite c2.sqlite
+
+You will see two files (c1.sqlite.sh and c2.sqlite.sh, extensions are .bat if 
+you are in a Windows computer). ** WARNING **: As the files are in different
+computer they cannot be compared. Therefore the script show the potential 
+duplicates acording to md5partial hash.
+
+You can get less false positives by doing a full hashing but this might be 
+* VERY * time consuming if you have a lot of large files. An alternative is to 
+hash by md5partial, remove singles (those which we are sure are not duplicated), 
+and rehash the rest::
+
+    # In computer 1
+    dedup index -o c1.sqlite -r /your/folder
+
+    # In computer 2
+    dedup index -o c2.sqlite -r /your/other/folder  
+    
+    # Bring the two files to the same computer
+    dedup nosingle c1.sqlite c2.sqlite  
+    # Copy back the files to the originating computer
+
+    # In computer 1
+    dedup index -o refined1.sqlite --by-md5 --db c1.sqlite
+
+    # In computer 2
+    dedup index -o refined2.sqlite --by-md5 --db c2.sqlite
+
+    # Bring the two refined files to the same computer
+    dedup script --pot refined1.sqlite refined2.sqlite  
+
+Hopefully there will be now only a few potential duplicates which you can 
+transfer from computer to the other and do a real comparison (or you can take
+your chances and delete them!).
+
+
+From a group of duplicates, which file is kept?
+-----------------------------------------------
+
+The first file appearing in the index is kept. You may force from which folder
+are these files by specifiying it first in the list of folders::
+
+    dedup find -o byedups.sh /your/main/folder /your/other/folder
+
+If you are deduplicating from multiple computers, put first in the list the 
+index generated in the computer where you want to keep the files.
+
+
+Other commands
+--------------
+
+You can inspect a index database file with the following commands::
+
+    - list: Tab separated list the content of an index.
+    - info: Display indexing method and duplication statistics.
+    - doc: Print this help
+
+"""
+
+# Copyright (c) 2011 Hernan Grecco
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+# OTHER DEALINGS IN THE SOFTWARE.
+
+
+__author__ = 'Hernan Grecco <hernan.grecco@gmail.com>'
+__license__ = 'MIT <http://www.opensource.org/licenses/mit-license.php>'
+
+__version__ = '0.1'
+
+import os
+import sys
+import stat
+import shutil
+import hashlib
+import sqlite3
+import filecmp
+import tempfile
+import argparse
+
+from fnmatch import fnmatch
+from datetime import datetime
+from functools import partial
+from itertools import imap, groupby, ifilter, ifilterfalse
+from collections import defaultdict
+from os.path import join, getsize, abspath, isfile
+from operator import itemgetter, attrgetter, not_
+
+class groupcmp(object):
+
+    def __init__(self, iterable, key=None):
+        """File grouping iterator based on itertools.groupby.
+
+        The iterable must yield tuples with a file's fullpath as first element.
+        First, pre groups are assembled based on tuples keys. The files are 
+        then compared among each other yield groups of files which are 
+        identical.
+        """
+        if key is None:
+            key = lambda x: x
+        self.keyfunc = key
+        self.it = iter(iterable)
+        self.tgtkey = self.currkey = self.currvalue = object()
+        self.groups = []
+        self.next_members = []
+        self.done = False
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        if self.groups:
+            return (self.groupkey, self.groups.pop())
+        if self.done:
+            raise StopIteration
+        members = self.next_members
+        try:
+            while True:
+                self.currvalue = next(self.it)    # Exit on StopIteration
+                self.currkey = self.keyfunc(self.currvalue)
+                if self.currkey == self.tgtkey:
+                    members.append(self.currvalue)
+                else:
+                    self.next_members = [self.currvalue, ]
+                    break
+        except StopIteration:
+            self.done = True
+
+        self.groups = compare(members, itemgetter(0))
+        self.groupkey = self.tgtkey
+        self.tgtkey = self.currkey
+        return self.next()
+
+def compare(files, extractor=None):
+    """Group files by content.
+    
+    Keyword arguments:
+      files     -- iterable containing the files
+      extractor -- callable to extract the fullpath from the iterable element
+
+    Return a list of lists (groups > files)      
+    """
+    if extractor is None:
+        extractor = lambda x:x
+
+    groups = []
+    for file_ in files:
+        for group in groups:
+            if filecmp.cmp(extractor(group[0]), extractor(file_)):
+                group.append(file_)
+                break
+        else:
+            groups.append([file_, ])
+    return groups
+
+
+def hash(filename, block_size=8192, complete=True, hasher=hashlib.md5):
+    """Hash a file (or part of) and return the hex digest.
+
+    Keyword arguments:
+      filename   -- fullpath of the file to hash
+      block_size -- size of the reading block in bytes
+      complete   -- hash the full file, the first block otherwise
+      hasher     -- hasher to use
+    """
+    hasher_ = hasher()
+    with open(filename,'rb') as fp:
+        hasher_.update(fp.read(block_size)) 
+        if not complete:
+            return hasher_.hexdigest()
+        for chunk in iter(lambda: fp.read(block_size), ''): 
+            hasher_.update(chunk)
+    return hasher_.hexdigest()
+
+
+def identify(filename, method):
+    """Generate an identifier for a file
+
+    Keyword arguments:
+      filename -- fullpath of the file to hash
+      method   -- which technique should be used
+                  Valid: size, md5partial, md5
+    """
+    if method == 'size':
+        return (filename, getsize(filename))
+    elif method == 'md5partial':
+        return (filename, hash(filename, complete=False))
+    elif method == 'md5':
+        return (filename, hash(filename, complete=True))
+    raise ValueError('{} is not a valid level for identify'.format(method))
+
+
+def match_any(value, patterns):
+    """Check if value matches a set of patterns
+
+    Keyword arguments:
+      value    -- value to check
+      patterns -- iterable of included patterns (can contain wildcards)
+    """
+    for pattern in patterns:
+        if fnmatch(base, pattern):
+            return True
+    return False
+
+
+def iwalk(top):
+    """Iterator wrapper around os.walk to perform top-bottom listing.
+    
+    Keyword arguments:
+      top      -- Folder to start the recursive walk
+    """
+    for root, dirs, files in os.walk(top):
+        for name in files:
+            yield join(root, name)
+
+
+def ilistdir(top):
+    """Iterator wrapper around os.listdir to perform a folder listing.
+
+    Keyword arguments:
+      top      -- Folder to list
+    """
+    for name in os.listdir(top):
+        yield join(top, name)
+
+
+class IndexDB(object):
+
+    def __init__(self, resource=':memory:'):
+        """Wrapper object around the index database (sqlite3).
+
+        Keyword arguments:
+          resource -- a sqlite3 database or iterable of sqlite3 databases
+        """
+        self.dbcount = 0
+        self._union = []
+        if isinstance(resource, str):
+            self.con = sqlite3.connect(resource)
+        else:
+            self.con = sqlite3.connect(':memory:')
+            self.attach(*resource)
+        self.con.text_factory = str
+        self._index = '(SELECT "single" as db,  * FROM fileindex)'
+        self._info = '(SELECT "single" as db,  * FROM info)'
+
+    @classmethod
+    def connect(cls, resource):
+        """Return an IndexDB object connected to the resource.
+        """
+        return cls(resource)
+
+    @classmethod
+    def create(cls, resource, method):
+        """Create a sqlite3 databases and return an IndexDB object around it.
+
+        Keyword arguments:
+          resource -- a sqlite3 database to be created
+          method   -- the index method to be used (to be stored in info table)
+        """
+        db = cls(resource)
+        cur = db.con.cursor()
+        if cur.execute("SELECT count(*) FROM sqlite_master where NAME=?",
+                       ("fileindex" ,)).fetchone()[0]:
+            print('A table named fileindex already exists in {}. '
+                  'Please delete it or rename it'.format(resource))
+            sys.exit(1)
+
+        cur.execute('CREATE TABLE fileindex (key, value)')
+        cur.execute("""CREATE VIEW info AS 
+                        SELECT "{}" as method, 
+                               "{}" as platform""".format(method, sys.platform))
+        db.dbcount = 1
+        cur.close()
+        return db
+
+    def attach(self, *resources):
+        """Attach resources to IndexDB
+        """
+        cur = self.con.cursor()
+        for ndx, resource in enumerate(resources, self.dbcount):
+            self.dbcount += 1 
+            cur.execute('ATTACH database "{}" as db{}'.format(resource, ndx))
+            self._union.append("""SELECT "{}" as "db", * 
+                                  FROM db{}.__table__""".format(resource, ndx))
+
+        union = '(' + ' union '.join(self._union) + ')'
+        self._index = union.replace('__table__', 'fileindex')
+        self._info = union.replace('__table__', 'info')
+        cur.close()
+
+    def all(self):
+        """Yield all indexed files
+        """
+        cur = self.con.cursor()
+        cur.execute('SELECT * FROM {} ORDER BY value'.format(self._index))
+        for row in cur:
+            yield row
+        cur.close()
+
+    def dups(self):
+        """Yield all potential duplicates
+        """
+        cur = self.con.cursor()
+        cur.execute("""SELECT * FROM {0} WHERE value IN (
+                        SELECT value FROM {0} GROUP BY value 
+                        HAVING (COUNT(value) > 1)) 
+                        ORDER BY value""".format(self._index))
+        for row in cur:
+            yield row
+        cur.close()
+
+    def info(self):
+        """Yield information about how the index was built.
+        """
+        cur = self.con.cursor()
+        cur.execute('SELECT * FROM {0}'.format(self._info))
+        for row in cur:
+            yield row
+        cur.close()       
+
+    def stats(self):
+        """Return a tuple with the number of files, 
+        potential duplicates and groups.
+        """
+        cur = self.con.cursor()
+
+        files = cur.execute('SELECT count(*) from {}'.format(self._index))
+        files = cur.fetchone()[0]
+
+        dups = cur.execute("""SELECT COUNT(*) FROM {0} 
+                                WHERE value IN (
+                                SELECT value FROM {0} GROUP BY value 
+                                HAVING (COUNT(value) > 1)) 
+                                ORDER BY value""".format(self._index))
+        dups = cur.fetchone()[0]
+
+        groups = cur.execute("""SELECT COUNT(DISTINCT value)FROM {0} 
+                                WHERE value IN (
+                                 SELECT value FROM {0} GROUP BY value 
+                                 HAVING (COUNT(value) > 1)) 
+                                 ORDER BY value""".format(self._index))
+        groups = cur.fetchone()
+        groups = groups[0]
+
+        cur.close()
+        return (files, dups, groups)
+
+    def insert(self, iterable, callback=None, commit_rate=10):
+        """Build index.
+
+        Keyword arguments:
+          iterable    -- values to insert
+          callback    -- function to call in each commit.
+                         Takes 1 argument: the number of insertions made so far                     
+          commit_rate -- number of insertions between commits
+
+        Return total number of insertions
+        """
+        insertsql = 'INSERT INTO fileindex (key, value) VALUES (?, ?)'
+
+        cur = self.con.cursor()    
+        count = 0;
+        for element in iterable:
+            try:
+               cur.execute(insertsql, element)
+            except sqlite3.ProgrammingError as e:
+                print(element)
+                print(e)
+            count += 1
+            if count % commit_rate == 0:
+                if callback:
+                    callback(count)
+                self.con.commit()
+        self.con.commit()
+        cur.close()
+        return count
+
+    def nosingle(self):
+        """Remove items from the index which appear a single time
+        """
+        cur = self.con.cursor()
+        cur.execute("""CREATE TEMPORARY VIEW singles AS 
+                       SELECT value FROM {0} GROUP BY value 
+                       HAVING (COUNT(value) = 1)""".format(self._index))
+        self.con.commit()
+        count = 0
+        for num in range(self.dbcount):
+            cur.execute("""DELETE FROM db{0}.fileindex 
+                           WHERE value IN singles""".format(num))
+            count += cur.rowcount
+        self.con.commit()
+        cur.close()
+        return count
+
+    def close(self):
+        """Close connection the database
+        """
+        self.con.close()
+
+
+def rater(start_time):
+    def _internal(count):
+        return count / (datetime.now() - start_time).total_seconds()
+    return _internal
+
+def print_time(msg='Starting', start_time=None):
+    """Print message and current time.
+
+    Keyword argument(
+      msg        -- Message to print
+      start_time -- if given, the difference between current and start_time
+                    is also printed
+
+    Return current time
+    """
+    now = datetime.now()
+    if start_time:
+        print('{} {} (timedelta {})'.format(now, msg, now - start_time))
+        return now
+    print('{} {}'.format(now, msg))
+    return now
+
+
+def print_status(msg):
+    """Delete current line from terminal and print current time and 
+    new status message
+    """
+    sys.stdout.write('\r{} {}'.format(datetime.now(), msg))
+    sys.stdout.flush()
+
+
+def _index(iterable, output='db.sqlite', method='md5partial'):
+    """Build index.
+
+    Keyword arguments:
+      iterable -- files to index 
+      output   -- index database filename
+      method   -- method to index the files (see identify for valid options)
+    """
+    
+    start_time = print_time('Indexing started')
+    rate = rater(start_time)
+    fun = partial(identify, method=method)
+    report = lambda x: print_status('Files indexed: {:d}. {:.0f} files/sec'.format(x, rate(x)))
+
+    db = IndexDB.create(output, method)
+    count = db.insert(imap(fun, iterable), callback=report)
+    db.close()
+
+    report(count)
+    print('')
+    print_time('Done', start_time)
+    
+
+def _list(indices, group='none', query='all'):
+    """Yields the database grouped.
+
+    Keywords:
+      file  -- index database filename
+      group -- Methods to group the results.
+               none: do not group
+               hash: group using the hash stored in the index
+               cmp: group comparing the content of the files 
+      query -- all or dups
+    """
+    db = IndexDB(indices)
+    if query == 'all':
+        it = db.all()
+    else:
+        it = db.dups()
+
+    if group == 'cmp':
+        it = groupcmp(it, key=itemgetter(2))
+    elif group == 'hash':
+        it = groupby(it, key=itemgetter(2))
+    elif group == 'none':
+        def _x(iterable):
+            yield (None, iterable)
+        it = _x(it)
+    else:
+        raise ValueError('{} is not a valid group'.format(group))
+
+    for el in it:
+        yield el
+    db.close()
+
+
+def index(folders, recursive=True, output='db.sqlite', method='md5partial', 
+          include=(), exclude=(), from_db=False, **kwargs):
+    """Build an index from the content of one or more folders.
+    
+    Keyword arguments
+      folders   -- iterable of folders to list
+      recursive -- recurse subdirectories
+      output    -- index database filename
+      method    -- method to index the files (see identify for valid options)
+      include   -- iterable of included patterns (can contain wildcards)
+      exclude   -- iterable of excluded patterns (can contain wildcards)
+      from_db   -- interpret folders as databases
+    """
+
+    if recursive:
+        it = iwalk
+    else:
+        it = ilistdir
+
+    if from_db:
+        def internal(it):
+            for index in folders:
+                db = IndexDB(index)
+                for row in db.all():
+                    yield row[1]
+    else:
+        def internal(it):
+            for folder in folders:
+                it = ifilter(isfile, it(abspath(folder)))
+
+                if include:
+                    it = ifilter(lambda x: match_any(x, include), it)
+                if exclude:
+                    it = ifilterfalse(lambda x: match_any(x, exclude), it)
+
+                for fullpath in it:
+                    yield fullpath
+
+    _index(internal(it), output, method)
+
+
+def list(indices, output, group='hash', show_hash=True, show_number=True, **kwargs):
+    """Tab separated list the content of an index.
+
+    Format:
+    <Number within group (opt)>\t<index>\t<filename>\t<hash (opt)>
+
+    Keyword arguments
+      indice      -- index database filenames
+      output      -- output filename (None = stdout)
+      group       -- Methods to group the results.
+                     none: do not group
+                     hash: group using the hash stored in the index
+                     cmp: group comparing the content of the files 
+      show_hash   -- print hash?
+      show_number -- print number within group?
+    """
+    if output:
+        try:
+            fp = open(output, 'w')
+        except IOError as e:
+            print(e)
+            return
+    else:
+        fp = sys.stdout
+
+    if show_hash:
+        format_spec = '{1}\t{2}\t{3}\n'
+    else:
+        format_spec = '{1}\t{2}\n'
+
+    if show_number:
+        format_spec = '{0}\t' + format_spec
+
+    if group == 'none':
+        query = 'all'
+    else:
+        query = 'dups'
+
+    it = _list(indices, group, query)
+    for key, group in it:
+        for ndx, row in enumerate(group):
+            fp.write(format_spec.format(ndx, *row))
+    fp.close()
+
+
+def info(indices, **kwargs):
+    """Sumarize index.
+
+    Keyword arguments
+      indices  -- index database filenames
+    """
+    db = IndexDB()
+    db.attach(*indices)
+    ok = True
+    for row in db.info():
+        print('{} index by {}'.format(*row))
+        ok = ok and row[1] == row[1]
+
+    if not ok:
+        raise ValueError('All files must be indexed in the same way')
+
+    spec = '{} files, {} potential duplicates in {} groups'
+    print(spec.format(*db.stats()))
+    db.close()
+
+
+def nosingle(indices, **kwargs):
+    """In place deletion of non-duplicated files
+
+    Keyword arguments
+      indices  -- index database filenames
+    """
+    db = IndexDB()
+    db.attach(*indices)
+
+    ok = True
+    for row in db.info():
+        print('{} index by {}'.format(*row))
+        ok = ok and row[1] == row[1]
+
+    if not ok:
+        raise ValueError('All files must be indexed in the same way')
+    
+    print(db.nosingle())
+    db.close()
+
+
+def script(indices, group='cmp', output=None, **kwargs):
+    """Create a script to remove duplicates. 
+
+    Keyword arguments
+      indices -- index database filenames
+      group   -- Methods to group the results.
+                 none: do not group
+                 hash: group using the hash stored in the index
+                 cmp: group comparing the content of the files 
+    """
+    if sys.platform.startswith == 'win':
+        spec0, spec1, ext = 'echo "{1}"\n', 'del "{1}"\n', '.bat'
+    else:
+        spec0, spec1, ext = 'echo "{1}"\n', 'rm "{1}"\n', '.sh'
+
+    start_time = print_time('Script generation started')
+    rate = rater(start_time)
+    report = lambda x: print_status('Files indexed: {:d}. {:.0f} files/sec'.format(x, rate(x)))
+
+    it = _list(indices, group, 'dups')
+
+    count = 0
+    files = dict()
+    for key, group in it:
+        for ndx, row in enumerate(group):
+            count += 1
+            if output:
+                filename = output
+            else:
+                filename = row[0] + ext
+            if filename not in files:
+                files[filename] = open(filename, 'w')
+            if ndx == 0:
+                files[filename].write(spec0.format(*row))
+            else:
+                files[filename].write(spec1.format(*row))
+            if count % 10 == 0:
+                print_status(report(count))
+    for fp in files.values():
+        fp.close()
+    report(count)
+    print('')
+    print_time('Done', start_time)
+
+
+def find(**kwargs):
+    """Build an index from the content of one or more folders and write a 
+    script to delete the duplicates. See index and script for details about
+    the arguments.
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        output = kwargs['output']
+        kwargs['output'] = join(tmp, 'db.sqlite')
+        index(**kwargs)
+        kwargs['indices'] = (kwargs['output'], )
+        kwargs['output'] = output
+        script(**kwargs)
+    except Exception as e:
+        print(e)
+        shutil.rmtree(tmp)
+    
+def doc(**kwargs):
+    """Print module documentation
+    """
+    print(__doc__)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Deduplication tool.')
+    subparsers = parser.add_subparsers(dest="subparser_name")
+
+    # index subcommand
+    sub = subparsers.add_parser('index', help='Index files')
+    sub.add_argument('-o', '--output', type=str,
+                     default='db.sqlite',
+                     help='Index filename')
+    group = sub.add_mutually_exclusive_group()
+    group.add_argument('--by-size', dest='method', default='md5partial', 
+                        action='store_const', const='size', 
+                        help='Index files by size')
+    group.add_argument('--by-md5p', dest='method', action='store_const', const='md5partial',
+                       help='Index files by md5 hashing the first 8Kb')
+    group.add_argument('--by-md5', dest='method', action='store_const', const='md5',
+                       help='Index files by md5 hashing')
+    sub.add_argument('-i', '--include', nargs='*', default=(),
+                       help='Patterns to include')
+    sub.add_argument('-e', '--exclude', nargs='*', default=(),
+                       help='Patterns to exclude')
+    sub.add_argument('-r', '--recursive', action='store_true', default=False,
+                     help='Recurse subfolders')
+    sub.add_argument('-d', '--from-db', dest='from_db', action='store_true', 
+                     default=False, help='Treat folders as indices')
+    sub.add_argument('folders', nargs='+',
+                      help='Folders to scan')
+
+    # info subcommand
+    sub = subparsers.add_parser('info', help='Info on potential duplicates')
+    sub.add_argument('-o', '--output', type=str, default='', help='Output file')
+    sub.add_argument('indices', nargs='+', type=str, help='One or more indices')
+
+    # list subcommand
+    sub = subparsers.add_parser('list', help='List (potential) duplicates')
+    sub.add_argument('-o', '--output', type=str, default='', help='Output file')
+    group = sub.add_mutually_exclusive_group()
+    group.add_argument('--all', dest='group', default='hash', action='store_const', const='none',
+                       help='Do not group')
+    group.add_argument('--pot', dest='group', action='store_const', const='hash',
+                       help='Group potential duplicates (compare by hash)')
+    group.add_argument('--dup', dest='group', action='store_const', const='cmp',
+                       help='Group duplicates (compare by content)')
+    sub.add_argument('-s', '--show-hash', action='store_true', default=False,
+                        help='Show file hash')
+    sub.add_argument('indices', nargs='+', type=str, help='Index files')
+
+    # script subcommand
+    sub = subparsers.add_parser('script', help='Generate deduplication script')
+    sub.add_argument('-o', '--output', type=str, default='', help='Output file')
+    group = sub.add_mutually_exclusive_group()
+    group.add_argument('--pot', dest='group', default='cmp', action='store_const', const='hash',
+                       help='Delete potential duplicates (compare by hash')
+    group.add_argument('--dup', dest='group', action='store_const', const='cmp',
+                       help='Delete duplicated (compare by content)')
+    sub.add_argument('indices', nargs='+', type=str, help='Index files')
+
+    # nosingle subcommand
+    sub = subparsers.add_parser('nosingle', help='In place non-duplicated files')
+    sub.add_argument('-o', '--output', type=str, default='refined.sqlite',
+                     help='Output file')
+    sub.add_argument('indices', nargs='+', type=str, help='Index files')
+
+    # find subcommand
+    sub = subparsers.add_parser('find', help='Find dups and generate script')
+    sub.add_argument('-o', '--output', type=str, default='byedups.sh',
+                     help='Script filename')
+    group = sub.add_mutually_exclusive_group()
+    group.add_argument('--by-size', dest='method', default='md5partial', action='store_const', const='size',
+                       help='Index files by size')
+    group.add_argument('--by-md5p', dest='method', action='store_const', const='md5partial',
+                       help='Index files by md5 hashing the first 8Kb')
+    group.add_argument('--by-md5', dest='method', action='store_const', const='md5',
+                       help='Index files by md5 hashing')
+    sub.add_argument('-i', '--include', nargs='*', default=(),
+                       help='Patterns to include')
+    sub.add_argument('-e', '--exclude', nargs='*', default=(),
+                       help='Patterns to exclude')
+    sub.add_argument('-r', '--recursive', action='store_true', default=False,
+                     help='Recurse subdirectories')
+    group = sub.add_mutually_exclusive_group()
+    group.add_argument('--pot', dest='group', default='cmp', action='store_const', const='hash',
+                       help='Delete potential duplicates (compare by hash')
+    group.add_argument('--dup', dest='group', action='store_const', const='cmp',
+                       help='Delete duplicated (compare by content)')
+    sub.add_argument('-d', '--from-db', dest='from_db', action='store_true', 
+                     default=False, help='Treat folders as indices')
+    sub.add_argument('folders', nargs='+',
+                      help='Folders to scan')
+
+    # doc subparser
+    sub = subparsers.add_parser('doc', help='Print docs')
+
+    args = parser.parse_args()
+    exit = locals()[args.subparser_name](**vars(args))
+    if exit:
+        sys.exit(exit)
