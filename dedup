@@ -221,7 +221,7 @@ class groupcmp(object):
         except StopIteration:
             self.done = True
 
-        self.groups = compare(members, itemgetter(0))
+        self.groups = compare(members, itemgetter(1))
         self.groupkey = self.tgtkey
         self.tgtkey = self.currkey
         return self.next()
