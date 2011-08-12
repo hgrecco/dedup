@@ -1,0 +1,434 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="generator" content="Docutils 0.7: http://docutils.sourceforge.net/" />
+<title>dedup: a deduplication tool</title>
+<style type="text/css">
+
+/*
+:Author: David Goodger (goodger@python.org)
+:Id: $Id: html4css1.css 6253 2010-03-02 00:24:53Z milde $
+:Copyright: This stylesheet has been placed in the public domain.
+
+Default cascading style sheet for the HTML output of Docutils.
+
+See http://docutils.sf.net/docs/howto/html-stylesheets.html for how to
+customize this style sheet.
+*/
+
+/* used to remove borders from tables and images */
+.borderless, table.borderless td, table.borderless th {
+  border: 0 }
+
+table.borderless td, table.borderless th {
+  /* Override padding for "table.docutils td" with "! important".
+     The right padding separates the table cells. */
+  padding: 0 0.5em 0 0 ! important }
+
+.first {
+  /* Override more specific margin styles with "! important". */
+  margin-top: 0 ! important }
+
+.last, .with-subtitle {
+  margin-bottom: 0 ! important }
+
+.hidden {
+  display: none }
+
+a.toc-backref {
+  text-decoration: none ;
+  color: black }
+
+blockquote.epigraph {
+  margin: 2em 5em ; }
+
+dl.docutils dd {
+  margin-bottom: 0.5em }
+
+/* Uncomment (and remove this text!) to get bold-faced definition list terms
+dl.docutils dt {
+  font-weight: bold }
+*/
+
+div.abstract {
+  margin: 2em 5em }
+
+div.abstract p.topic-title {
+  font-weight: bold ;
+  text-align: center }
+
+div.admonition, div.attention, div.caution, div.danger, div.error,
+div.hint, div.important, div.note, div.tip, div.warning {
+  margin: 2em ;
+  border: medium outset ;
+  padding: 1em }
+
+div.admonition p.admonition-title, div.hint p.admonition-title,
+div.important p.admonition-title, div.note p.admonition-title,
+div.tip p.admonition-title {
+  font-weight: bold ;
+  font-family: sans-serif }
+
+div.attention p.admonition-title, div.caution p.admonition-title,
+div.danger p.admonition-title, div.error p.admonition-title,
+div.warning p.admonition-title {
+  color: red ;
+  font-weight: bold ;
+  font-family: sans-serif }
+
+/* Uncomment (and remove this text!) to get reduced vertical space in
+   compound paragraphs.
+div.compound .compound-first, div.compound .compound-middle {
+  margin-bottom: 0.5em }
+
+div.compound .compound-last, div.compound .compound-middle {
+  margin-top: 0.5em }
+*/
+
+div.dedication {
+  margin: 2em 5em ;
+  text-align: center ;
+  font-style: italic }
+
+div.dedication p.topic-title {
+  font-weight: bold ;
+  font-style: normal }
+
+div.figure {
+  margin-left: 2em ;
+  margin-right: 2em }
+
+div.footer, div.header {
+  clear: both;
+  font-size: smaller }
+
+div.line-block {
+  display: block ;
+  margin-top: 1em ;
+  margin-bottom: 1em }
+
+div.line-block div.line-block {
+  margin-top: 0 ;
+  margin-bottom: 0 ;
+  margin-left: 1.5em }
+
+div.sidebar {
+  margin: 0 0 0.5em 1em ;
+  border: medium outset ;
+  padding: 1em ;
+  background-color: #ffffee ;
+  width: 40% ;
+  float: right ;
+  clear: right }
+
+div.sidebar p.rubric {
+  font-family: sans-serif ;
+  font-size: medium }
+
+div.system-messages {
+  margin: 5em }
+
+div.system-messages h1 {
+  color: red }
+
+div.system-message {
+  border: medium outset ;
+  padding: 1em }
+
+div.system-message p.system-message-title {
+  color: red ;
+  font-weight: bold }
+
+div.topic {
+  margin: 2em }
+
+h1.section-subtitle, h2.section-subtitle, h3.section-subtitle,
+h4.section-subtitle, h5.section-subtitle, h6.section-subtitle {
+  margin-top: 0.4em }
+
+h1.title {
+  text-align: center }
+
+h2.subtitle {
+  text-align: center }
+
+hr.docutils {
+  width: 75% }
+
+img.align-left, .figure.align-left, object.align-left {
+  clear: left ;
+  float: left ;
+  margin-right: 1em }
+
+img.align-right, .figure.align-right, object.align-right {
+  clear: right ;
+  float: right ;
+  margin-left: 1em }
+
+img.align-center, .figure.align-center, object.align-center {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.align-left {
+  text-align: left }
+
+.align-center {
+  clear: both ;
+  text-align: center }
+
+.align-right {
+  text-align: right }
+
+/* reset inner alignment in figures */
+div.align-right {
+  text-align: left }
+
+/* div.align-center * { */
+/*   text-align: left } */
+
+ol.simple, ul.simple {
+  margin-bottom: 1em }
+
+ol.arabic {
+  list-style: decimal }
+
+ol.loweralpha {
+  list-style: lower-alpha }
+
+ol.upperalpha {
+  list-style: upper-alpha }
+
+ol.lowerroman {
+  list-style: lower-roman }
+
+ol.upperroman {
+  list-style: upper-roman }
+
+p.attribution {
+  text-align: right ;
+  margin-left: 50% }
+
+p.caption {
+  font-style: italic }
+
+p.credits {
+  font-style: italic ;
+  font-size: smaller }
+
+p.label {
+  white-space: nowrap }
+
+p.rubric {
+  font-weight: bold ;
+  font-size: larger ;
+  color: maroon ;
+  text-align: center }
+
+p.sidebar-title {
+  font-family: sans-serif ;
+  font-weight: bold ;
+  font-size: larger }
+
+p.sidebar-subtitle {
+  font-family: sans-serif ;
+  font-weight: bold }
+
+p.topic-title {
+  font-weight: bold }
+
+pre.address {
+  margin-bottom: 0 ;
+  margin-top: 0 ;
+  font: inherit }
+
+pre.literal-block, pre.doctest-block {
+  margin-left: 2em ;
+  margin-right: 2em }
+
+span.classifier {
+  font-family: sans-serif ;
+  font-style: oblique }
+
+span.classifier-delimiter {
+  font-family: sans-serif ;
+  font-weight: bold }
+
+span.interpreted {
+  font-family: sans-serif }
+
+span.option {
+  white-space: nowrap }
+
+span.pre {
+  white-space: pre }
+
+span.problematic {
+  color: red }
+
+span.section-subtitle {
+  /* font-size relative to parent (h1..h6 element) */
+  font-size: 80% }
+
+table.citation {
+  border-left: solid 1px gray;
+  margin-left: 1px }
+
+table.docinfo {
+  margin: 2em 4em }
+
+table.docutils {
+  margin-top: 0.5em ;
+  margin-bottom: 0.5em }
+
+table.footnote {
+  border-left: solid 1px black;
+  margin-left: 1px }
+
+table.docutils td, table.docutils th,
+table.docinfo td, table.docinfo th {
+  padding-left: 0.5em ;
+  padding-right: 0.5em ;
+  vertical-align: top }
+
+table.docutils th.field-name, table.docinfo th.docinfo-name {
+  font-weight: bold ;
+  text-align: left ;
+  white-space: nowrap ;
+  padding-left: 0 }
+
+h1 tt.docutils, h2 tt.docutils, h3 tt.docutils,
+h4 tt.docutils, h5 tt.docutils, h6 tt.docutils {
+  font-size: 100% }
+
+ul.auto-toc {
+  list-style-type: none }
+
+</style>
+</head>
+<body>
+<div class="document" id="dedup-a-deduplication-tool">
+<h1 class="title">dedup: a deduplication tool</h1>
+
+<p>Find and delete duplicated files.</p>
+<div class="section" id="use-cases">
+<h1>Use cases</h1>
+<p>Find duplicates in a specific folder and create a script to delete them:</p>
+<pre class="literal-block">
+dedup find -o byedups.sh /your/folder
+</pre>
+<p>Find duplicated mp3 in a folder (and subfolders) and create a script to delete them:</p>
+<pre class="literal-block">
+dedup find --include *.mp3 -r -o byedups.sh /your/folder
+</pre>
+<p>Find duplicates except jpg in two folders and create a script to delete them:</p>
+<pre class="literal-block">
+dedup find --exclude *.jpg -o byedups.sh /your/folder /your/other/folder
+</pre>
+</div>
+<div class="section" id="how-does-it-work">
+<h1>How does it work?</h1>
+<p>Finding duplicates is a two steps process:</p>
+<pre class="literal-block">
+1. Indexing: The full path of each file is stored in a database together
+   with a hash of the file. Currently the following hashes are implemented:
+    a. size: size of the file in bytes.
+    b. md5partial: md5 hex digest of the first 8Kb of the file.
+    c. md5: md5 hex diggest of the file.
+
+   Hashing allows narrowing down the list of potetial duplicates.
+   While is very likely that two different files have the same size, it is
+   unlikely that they have the same hash (`birthday problem`_).
+
+   .. _birthday problem : http://en.wikipedia.org/wiki/Birthday_problem
+
+2. Comparing: the potential duplicates (i.e. files with the same hash) are
+   compared to detect true duplicates.
+</pre>
+<p>Which is the right hash method depends on the number of files to check, their
+size and the expected number of duplicates. Remember that is necessary to read
+the complete file to generate a full hash and therefore it is time consuming to
+do it for files in which the first 8k are already different.</p>
+<p>The default choice is md5partial which provides a good tradeoff between speed
+and reliability.</p>
+</div>
+<div class="section" id="why-do-you-generate-a-script-instead-of-directly-deleting-the-files">
+<h1>Why do you generate a script instead of directly deleting the files?</h1>
+<p>Is good to have a way to check (and double-check) before deleting lots of files,
+and being dedup a command line tool generating a script which you can open, edit
+and check was the simplest and yet most powerful.</p>
+<p>In addition this tools was concieved to delete duplicates across computers.
+Generating scripts allows you to do this easily.</p>
+</div>
+<div class="section" id="deduplicating-in-different-computers">
+<h1>Deduplicating in different computers</h1>
+<p>First create an index for each computer that you want to deduplicate:</p>
+<pre class="literal-block">
+# In computer 1
+dedup index -o c1.sqlite -r /your/folder
+
+# In computer 2
+dedup index -o c2.sqlite -r /your/other/folder
+</pre>
+<p>Then transfer the two databases (c1.sqlite and c2.sqlite) to a single computer
+and generate the script:</p>
+<pre class="literal-block">
+dedup script --pot c1.sqlite c2.sqlite
+</pre>
+<p>You will see two files (c1.sqlite.sh and c2.sqlite.sh, extensions are .bat if
+you are in a Windows computer). <strong>WARNING</strong>: As the files are in different
+computer they cannot be compared. Therefore the script show the potential
+duplicates acording to md5partial hash.</p>
+<p>You can get less false positives by doing a full hashing but this might be
+* VERY * time consuming if you have a lot of large files. An alternative is to
+hash by md5partial, remove singles (those which we are sure are not duplicated),
+and rehash the rest:</p>
+<pre class="literal-block">
+# In computer 1
+dedup index -o c1.sqlite -r /your/folder
+
+# In computer 2
+dedup index -o c2.sqlite -r /your/other/folder
+
+# Bring the two files to the same computer
+dedup nosingle c1.sqlite c2.sqlite
+# Copy back the files to the originating computer
+
+# In computer 1
+dedup index -o refined1.sqlite --by-md5 --db c1.sqlite
+
+# In computer 2
+dedup index -o refined2.sqlite --by-md5 --db c2.sqlite
+
+# Bring the two refined files to the same computer
+dedup script --pot refined1.sqlite refined2.sqlite
+</pre>
+<p>Hopefully there will be now only a few potential duplicates which you can
+transfer from computer to the other and do a real comparison (or you can take
+your chances and delete them!).</p>
+</div>
+<div class="section" id="from-a-group-of-duplicates-which-file-is-kept">
+<h1>From a group of duplicates, which file is kept?</h1>
+<p>The first file appearing in the index is kept. You may force from which folder
+are these files by specifiying it first in the list of folders:</p>
+<pre class="literal-block">
+dedup find -o byedups.sh /your/main/folder /your/other/folder
+</pre>
+<p>If you are deduplicating from multiple computers, put first in the list the
+index generated in the computer where you want to keep the files.</p>
+</div>
+<div class="section" id="other-commands">
+<h1>Other commands</h1>
+<p>You can inspect a index database file with the following commands:</p>
+<pre class="literal-block">
+- list: Tab separated list the content of an index.
+- info: Display indexing method and duplication statistics.
+- doc: Print this help
+</pre>
+</div>
+</div>
+</body>
+</html>
