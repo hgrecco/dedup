@@ -241,7 +241,12 @@ def compare(files, extractor=None):
     groups = []
     for file_ in files:
         for group in groups:
-            if filecmp.cmp(extractor(group[0]), extractor(file_)):
+            try:
+                cmpout = filecmp.cmp(extractor(group[0]), extractor(file_))
+            except Exception as e:
+                print(e)
+                cmpout = False
+            if cmpout:
                 group.append(file_)
                 break
         else:
@@ -606,9 +611,9 @@ def index(folders, recursive=True, output='db.sqlite', method='md5partial',
                 for row in db.all():
                     yield row[1]
     else:
-        def internal(it):
+        def internal(it_):
             for folder in folders:
-                it = ifilter(isfile, it(abspath(folder)))
+                it = ifilter(isfile, it_(abspath(folder)))
 
                 if include:
                     it = ifilter(lambda x: match_any(x, include), it)
