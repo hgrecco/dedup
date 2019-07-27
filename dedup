@@ -298,7 +298,7 @@ def match_any(value, patterns):
       patterns -- iterable of included patterns (can contain wildcards)
     """
     for pattern in patterns:
-        if fnmatch(base, pattern):
+        if fnmatch(value, pattern):
             return True
     return False
 
